@@ -8,11 +8,15 @@ Cloudflare Tunnel проксирует его наружу для доступа
 
 import asyncio
 import json
+import logging
 import sys
 import os
 from pathlib import Path
 
 from aiohttp import web
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+log = logging.getLogger("setup_web")
 
 AGENT_DIR = Path(__file__).parent
 TEMPLATE_DIR = AGENT_DIR / "templates"
@@ -51,23 +55,49 @@ async def handle_send_code(request: web.Request) -> web.Response:
     api_hash = body.get("api_hash", "").strip()
     phone = body.get("phone", "").strip()
 
+    log.info("send-code: api_id=%s phone=%s api_hash=%s...", api_id, phone, api_hash[:8] if api_hash else "")
+
     if not all([api_id, api_hash, phone]):
         return web.json_response({"error": "api_id, api_hash, phone required"}, status=400)
+
+    try:
+        api_id_int = int(api_id)
+    except (ValueError, TypeError):
+        return web.json_response({"error": "API ID должен быть числом"}, status=400)
 
     try:
         from telethon import TelegramClient
         from telethon.sessions import StringSession
 
-        _telethon_client = TelegramClient(StringSession(), int(api_id), api_hash)
-        await _telethon_client.connect()
+        # Закрыть предыдущий клиент если есть
+        if _telethon_client:
+            try:
+                await _telethon_client.disconnect()
+            except Exception:
+                pass
 
-        result = await _telethon_client.send_code_request(phone)
-        _phone = phone
-        _phone_code_hash = result.phone_code_hash
+        _telethon_client = TelegramClient(StringSession(), api_id_int, api_hash)
+        await _telethon_client.connect()
+        log.info("send-code: connected to Telegram")
+
+        if not await _telethon_client.is_user_authorized():
+            result = await _telethon_client.send_code_request(phone)
+            _phone = phone
+            _phone_code_hash = result.phone_code_hash
+            log.info("send-code: code sent to %s", phone)
 
         return web.json_response({"ok": True})
     except Exception as e:
-        return web.json_response({"error": str(e)}, status=500)
+        import traceback
+        traceback.print_exc()
+        # Закрыть клиент при ошибке
+        if _telethon_client:
+            try:
+                await _telethon_client.disconnect()
+            except Exception:
+                pass
+            _telethon_client = None
+        return web.json_response({"error": str(e)[:200]}, status=500)
 
 
 async def handle_verify_code(request: web.Request) -> web.Response:
