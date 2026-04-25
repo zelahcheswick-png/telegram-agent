@@ -142,6 +142,65 @@ async def on_message(event):
 
 # ── Heartbeat ─────────────────────────────────────────────────────────────────
 
+async def _handle_reconfigure():
+    """Запустить setup_web + cloudflared для перенастройки групп."""
+    import subprocess
+    import re
+
+    log.info("Launching reconfigure setup...")
+
+    # Запустить setup_web в reconfigure mode
+    try:
+        subprocess.Popen(
+            [sys.executable, "setup_web.py", "--reconfigure", f"--token={AGENT_TOKEN}"],
+            cwd=str(AGENT_DIR),
+        )
+    except Exception as e:
+        log.error("Failed to launch setup_web: %s", e)
+        return
+
+    # Запустить cloudflared
+    try:
+        cf_log = open("/tmp/cf_tunnel.log", "w")
+        subprocess.Popen(
+            ["cloudflared", "tunnel", "--url", "http://127.0.0.1:8080"],
+            stdout=cf_log,
+            stderr=subprocess.STDOUT,
+        )
+    except Exception as e:
+        log.error("Failed to launch cloudflared: %s", e)
+        return
+
+    # Ждать URL (до 20 сек)
+    url = None
+    for _ in range(20):
+        await asyncio.sleep(1)
+        try:
+            with open("/tmp/cf_tunnel.log") as f:
+                match = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", f.read())
+                if match:
+                    url = match.group()
+                    break
+        except FileNotFoundError:
+            pass
+
+    if url:
+        # Отправить URL на сервер
+        try:
+            body = json.dumps({"url": url}).encode()
+            req_headers = sign_request(API_KEY, API_SECRET, body)
+            http = await _get_http()
+            resp = await http.post(f"{ENDPOINT}/api/reconfigure-url", content=body, headers=req_headers)
+            if resp.status_code == 200:
+                log.info("Reconfigure URL sent: %s", url)
+            else:
+                log.warning("Reconfigure URL send failed: %d", resp.status_code)
+        except Exception as e:
+            log.error("Failed to send reconfigure URL: %s", e)
+    else:
+        log.error("Failed to get cloudflare tunnel URL")
+
+
 async def heartbeat():
     """Отправка heartbeat каждые 60 секунд."""
     while True:
@@ -166,6 +225,11 @@ async def heartbeat():
                         content=challenge_body,
                         headers=challenge_headers,
                     )
+
+                # Reconfigure requested by server
+                if data.get("reconfigure"):
+                    log.info("Reconfigure requested by server, launching setup...")
+                    asyncio.create_task(_handle_reconfigure())
         except Exception as e:
             log.warning("Heartbeat failed: %s", e)
 

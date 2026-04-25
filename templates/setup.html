@@ -110,6 +110,7 @@ button:disabled { background: #333; cursor: not-allowed; }
 
 <script>
 const TOKEN = '';
+const RECONFIGURE = false;
 let allGroups = [];
 let selectedGroups = new Set();
 let apiId = '';
@@ -121,6 +122,33 @@ function showStep(n) {
     var el = document.getElementById('step' + n) || document.getElementById(n);
     if (el) el.classList.add('active');
 }
+
+// Reconfigure mode: skip to step 4
+async function initReconfigure() {
+    document.getElementById('step1').style.display = 'none';
+    document.getElementById('step2').style.display = 'none';
+    document.getElementById('step3').style.display = 'none';
+    document.getElementById('step4').classList.add('active');
+    document.querySelector('#step4 h2').textContent = 'Измените группы для пересылки';
+
+    // Загрузить текущие выбранные группы
+    try {
+        const sr = await fetch('/api/selected-groups');
+        const sd = await sr.json();
+        if (sd.ok && sd.selected) {
+            sd.selected.forEach(id => selectedGroups.add(id));
+        }
+    } catch(e) {}
+
+    // Загрузить все группы
+    await loadGroups();
+}
+
+window.addEventListener('load', function() {
+    if (RECONFIGURE) {
+        initReconfigure();
+    }
+});
 
 function goToStep2() {
     apiId = document.getElementById('api_id').value.trim();
@@ -271,15 +299,18 @@ async function finish() {
     document.getElementById('finish-btn').disabled = true;
     document.getElementById('finish-btn').innerHTML = '<span class="spinner"></span> Сохранение...';
     try {
-        const r = await fetch('/api/save', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
+        const payload = RECONFIGURE
+            ? { groups: Array.from(selectedGroups) }
+            : {
                 api_id: apiId, api_hash: apiHash, phone: phone,
                 token: TOKEN, api_key: '', api_secret: '',
                 endpoint: 'https://bot.pulsedrive.pro',
                 groups: Array.from(selectedGroups)
-            })
+            };
+        const r = await fetch('/api/save', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
         });
         const d = await r.json();
         if (d.ok) {

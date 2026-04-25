@@ -4,9 +4,14 @@ TransferStats Agent — Локальный веб-сайт настройки.
 Запускается на 127.0.0.1:8080.
 Cloudflare Tunnel проксирует его наружу для доступа с телефона.
 После завершения настройки сайт автоматически закрывается.
+
+Режимы:
+  --token TOKEN         Первоначальная настройка (4 шага)
+  --reconfigure --token TOKEN  Перенастройка групп (только шаг 4)
 """
 
 import asyncio
+import configparser
 import json
 import logging
 import sys
@@ -22,7 +27,8 @@ AGENT_DIR = Path(__file__).parent
 TEMPLATE_DIR = AGENT_DIR / "templates"
 CONFIG_PATH = AGENT_DIR / "agent.ini"
 GROUPS_PATH = AGENT_DIR / "agent_groups.json"
-_AGENT_TOKEN = ""  # Устанавливается через --token при запуске
+_AGENT_TOKEN = ""
+_RECONFIGURE_MODE = False
 
 # Telethon клиент (создаётся при вводе API credentials)
 _telethon_client = None
@@ -31,16 +37,51 @@ _phone = None
 _phone_code_hash = None
 
 
+def _read_existing_config() -> dict:
+    """Прочитать текущую конфигурацию из agent.ini."""
+    if not CONFIG_PATH.exists():
+        return {}
+    cfg = configparser.ConfigParser()
+    cfg.read(CONFIG_PATH)
+    try:
+        return {
+            "api_id": cfg.get("telegram", "api_id", fallback=""),
+            "api_hash": cfg.get("telegram", "api_hash", fallback=""),
+            "phone": cfg.get("telegram", "phone", fallback=""),
+            "session": cfg.get("telegram", "session", fallback=""),
+            "token": cfg.get("agent", "token", fallback=""),
+            "api_key": cfg.get("agent", "api_key", fallback=""),
+            "api_secret": cfg.get("agent", "api_secret", fallback=""),
+            "endpoint": cfg.get("agent", "endpoint", fallback=""),
+            "groups": cfg.get("groups", "ids", fallback=""),
+        }
+    except Exception:
+        return {}
+
+
+def _read_selected_groups() -> list:
+    """Прочитать текущие выбранные группы из agent_groups.json."""
+    if GROUPS_PATH.exists():
+        try:
+            return json.loads(GROUPS_PATH.read_text()).get("groups", [])
+        except Exception:
+            pass
+    return []
+
+
 # ── Handlers ──────────────────────────────────────────────────────────────────
 
 async def handle_index(request: web.Request) -> web.Response:
     html_path = TEMPLATE_DIR / "setup.html"
     if not html_path.exists():
         return web.Response(text="Template not found", status=500)
-    return web.Response(
-        text=html_path.read_text(encoding="utf-8"),
-        content_type="text/html",
-    )
+    html = html_path.read_text(encoding="utf-8")
+
+    # В режиме reconfigure — инжектировать флаг в HTML
+    if _RECONFIGURE_MODE:
+        html = html.replace("const RECONFIGURE = false;", "const RECONFIGURE = true;")
+
+    return web.Response(text=html, content_type="text/html")
 
 
 async def handle_send_code(request: web.Request) -> web.Response:
@@ -70,7 +111,6 @@ async def handle_send_code(request: web.Request) -> web.Response:
         from telethon import TelegramClient
         from telethon.sessions import StringSession
 
-        # Закрыть предыдущий клиент если есть
         if _telethon_client:
             try:
                 await _telethon_client.disconnect()
@@ -91,7 +131,6 @@ async def handle_send_code(request: web.Request) -> web.Response:
     except Exception as e:
         import traceback
         traceback.print_exc()
-        # Закрыть клиент при ошибке
         if _telethon_client:
             try:
                 await _telethon_client.disconnect()
@@ -156,6 +195,30 @@ async def handle_verify_2fa(request: web.Request) -> web.Response:
 
 async def handle_groups(request: web.Request) -> web.Response:
     """Получить список групп пользователя."""
+    global _telethon_client, _session_string
+
+    # В режиме reconfigure — использовать существующую сессию из agent.ini
+    if _RECONFIGURE_MODE and not _telethon_client:
+        config = _read_existing_config()
+        session_str = config.get("session", "")
+        api_id = config.get("api_id", "")
+        api_hash = config.get("api_hash", "")
+
+        if not all([session_str, api_id, api_hash]):
+            return web.json_response({"error": "No existing session found in agent.ini"}, status=400)
+
+        try:
+            from telethon import TelegramClient
+            from telethon.sessions import StringSession
+
+            _telethon_client = TelegramClient(StringSession(session_str), int(api_id), api_hash)
+            await _telethon_client.connect()
+            _session_string = session_str
+            log.info("reconfigure: connected with existing session")
+        except Exception as e:
+            log.error("reconfigure: failed to connect: %s", e)
+            return web.json_response({"error": f"Failed to connect: {e}"}, status=500)
+
     if not _telethon_client:
         return web.json_response({"error": "authenticate first"}, status=400)
 
@@ -172,58 +235,85 @@ async def handle_groups(request: web.Request) -> web.Response:
         return web.json_response({"error": str(e)}, status=500)
 
 
+async def handle_selected_groups(request: web.Request) -> web.Response:
+    """Получить текущие выбранные группы (для reconfigure mode)."""
+    selected = _read_selected_groups()
+    return web.json_response({"ok": True, "selected": selected})
+
+
 async def handle_save(request: web.Request) -> web.Response:
-    """Сохранить конфигурацию и запустить агента."""
-    global _telethon_client
+    """Сохранить конфигурацию и запустить/перезапустить агента."""
+    global _telethon_client, _session_string
 
     try:
         body = await request.json()
     except Exception:
         return web.json_response({"error": "invalid json"}, status=400)
 
-    api_id = body.get("api_id")
-    api_hash = body.get("api_hash", "").strip()
-    phone = body.get("phone", "").strip()
-    endpoint = body.get("endpoint", "").strip()
     selected_groups = body.get("groups", [])
-    token = _AGENT_TOKEN  # Используем токен из аргументов запуска
+    token = _AGENT_TOKEN
 
-    log.info("save: api_id=%s groups=%d", api_id, len(selected_groups))
+    if _RECONFIGURE_MODE:
+        # Reconfigure: обновить только группы, остальное из agent.ini
+        config = _read_existing_config()
+        if not config:
+            return web.json_response({"error": "No existing config found"}, status=400)
 
-    if not all([api_id, api_hash, phone, endpoint]):
-        log.error("save: missing fields: api_id=%s api_hash=%s phone=%s token=%s endpoint=%s",
-                  bool(api_id), bool(api_hash), bool(phone), bool(token), bool(endpoint))
-        return web.json_response({"error": "missing fields"}, status=400)
+        api_id = config.get("api_id", "")
+        api_hash = config.get("api_hash", "")
+        phone = config.get("phone", "")
+        api_key = config.get("api_key", "")
+        api_secret = config.get("api_secret", "")
+        endpoint = config.get("endpoint", "")
+        session = config.get("session", "") or (_session_string or "")
 
-    if not _session_string:
-        return web.json_response({"error": "authenticate first"}, status=400)
+        if not all([api_id, api_hash, phone, endpoint, session]):
+            return web.json_response({"error": "Incomplete existing config"}, status=400)
 
-    # Получить api_key и api_secret с сервера по токену
-    api_key = ""
-    api_secret = ""
-    try:
-        import httpx as _httpx
-        async with _httpx.AsyncClient(timeout=10) as _c:
-            resp = await _c.get(f"{endpoint}/api/agent-credentials?token={token}")
-            if resp.status_code == 200:
-                creds = resp.json()
-                api_key = creds.get("api_key", "")
-                api_secret = creds.get("api_secret", "")
-                log.info("save: got credentials from server")
-            else:
-                log.warning("save: server returned %d for credentials", resp.status_code)
-    except Exception as e:
-        log.warning("save: failed to get credentials: %s", e)
+        log.info("reconfigure: saving %d groups", len(selected_groups))
+    else:
+        # Полная настройка
+        api_id = body.get("api_id")
+        api_hash = body.get("api_hash", "").strip()
+        phone = body.get("phone", "").strip()
+        endpoint = body.get("endpoint", "").strip()
 
-    if not api_key or not api_secret:
-        return web.json_response({"error": "Failed to get agent credentials from server. Check token."}, status=400)
+        log.info("save: api_id=%s groups=%d", api_id, len(selected_groups))
+
+        if not all([api_id, api_hash, phone, endpoint]):
+            return web.json_response({"error": "missing fields"}, status=400)
+
+        if not _session_string:
+            return web.json_response({"error": "authenticate first"}, status=400)
+
+        # Получить api_key и api_secret с сервера по токену
+        api_key = ""
+        api_secret = ""
+        try:
+            import httpx as _httpx
+            async with _httpx.AsyncClient(timeout=10) as _c:
+                resp = await _c.get(f"{endpoint}/api/agent-credentials?token={token}")
+                if resp.status_code == 200:
+                    creds = resp.json()
+                    api_key = creds.get("api_key", "")
+                    api_secret = creds.get("api_secret", "")
+                    log.info("save: got credentials from server")
+                else:
+                    log.warning("save: server returned %d for credentials", resp.status_code)
+        except Exception as e:
+            log.warning("save: failed to get credentials: %s", e)
+
+        if not api_key or not api_secret:
+            return web.json_response({"error": "Failed to get agent credentials from server. Check token."}, status=400)
+
+        session = _session_string
 
     # Сохранить agent.ini
     config_content = f"""[telegram]
 api_id = {api_id}
 api_hash = {api_hash}
 phone = {phone}
-session = {_session_string}
+session = {session}
 
 [agent]
 token = {token}
@@ -237,18 +327,21 @@ ids = {','.join(str(g) for g in selected_groups)}
     CONFIG_PATH.write_text(config_content)
     os.chmod(CONFIG_PATH, 0o600)
 
-    # Сохранить группы в JSON (для динамического обновления)
+    # Сохранить группы в JSON
     GROUPS_PATH.write_text(json.dumps({"groups": selected_groups}))
 
-    # Запустить systemd сервис (async, не блокирует event loop)
+    # Перезапустить systemd сервис
     proc = await asyncio.create_subprocess_exec("systemctl", "enable", "telegram-agent")
     await proc.wait()
-    proc = await asyncio.create_subprocess_exec("systemctl", "start", "telegram-agent")
+    proc = await asyncio.create_subprocess_exec("systemctl", "restart", "telegram-agent")
     await proc.wait()
 
     # Отключить Telethon
     if _telethon_client:
-        await _telethon_client.disconnect()
+        try:
+            await _telethon_client.disconnect()
+        except Exception:
+            pass
 
     return web.json_response({"ok": True})
 
@@ -269,6 +362,7 @@ def create_app() -> web.Application:
     app.router.add_post("/api/verify-code", handle_verify_code)
     app.router.add_post("/api/verify-2fa", handle_verify_2fa)
     app.router.add_get("/api/groups", handle_groups)
+    app.router.add_get("/api/selected-groups", handle_selected_groups)
     app.router.add_post("/api/save", handle_save)
     app.router.add_post("/api/finish", handle_finish)
     return app
@@ -278,7 +372,10 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--token", default="", help="Agent token for server auth")
+    parser.add_argument("--reconfigure", action="store_true", help="Reconfigure mode (skip auth steps)")
     args = parser.parse_args()
     _AGENT_TOKEN = args.token
-    log.info("Starting setup web server on http://127.0.0.1:8080")
+    _RECONFIGURE_MODE = args.reconfigure
+    mode = "reconfigure" if _RECONFIGURE_MODE else "setup"
+    log.info("Starting %s web server on http://127.0.0.1:8080", mode)
     web.run_app(create_app(), host="127.0.0.1", port=8080, print=None)
