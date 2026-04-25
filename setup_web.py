@@ -184,16 +184,38 @@ async def handle_save(request: web.Request) -> web.Response:
     api_hash = body.get("api_hash", "").strip()
     phone = body.get("phone", "").strip()
     token = body.get("token", "").strip()
-    api_key = body.get("api_key", "").strip()
-    api_secret = body.get("api_secret", "").strip()
     endpoint = body.get("endpoint", "").strip()
     selected_groups = body.get("groups", [])
 
-    if not all([api_id, api_hash, phone, token, api_key, api_secret, endpoint]):
+    log.info("save: api_id=%s phone=%s token=%s groups=%d", api_id, phone, token[:8] if token else "", len(selected_groups))
+
+    if not all([api_id, api_hash, phone, token, endpoint]):
+        log.error("save: missing fields: api_id=%s api_hash=%s phone=%s token=%s endpoint=%s",
+                  bool(api_id), bool(api_hash), bool(phone), bool(token), bool(endpoint))
         return web.json_response({"error": "missing fields"}, status=400)
 
     if not _session_string:
         return web.json_response({"error": "authenticate first"}, status=400)
+
+    # Получить api_key и api_secret с сервера по токену
+    api_key = ""
+    api_secret = ""
+    try:
+        import httpx as _httpx
+        async with _httpx.AsyncClient(timeout=10) as _c:
+            resp = await _c.get(f"{endpoint}/api/agent-credentials?token={token}")
+            if resp.status_code == 200:
+                creds = resp.json()
+                api_key = creds.get("api_key", "")
+                api_secret = creds.get("api_secret", "")
+                log.info("save: got credentials from server")
+            else:
+                log.warning("save: server returned %d for credentials", resp.status_code)
+    except Exception as e:
+        log.warning("save: failed to get credentials: %s", e)
+
+    if not api_key or not api_secret:
+        return web.json_response({"error": "Failed to get agent credentials from server. Check token."}, status=400)
 
     # Сохранить agent.ini
     config_content = f"""[telegram]
