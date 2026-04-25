@@ -34,9 +34,6 @@ _phone_code_hash = None
 # ── Handlers ──────────────────────────────────────────────────────────────────
 
 async def handle_index(request: web.Request) -> web.Response:
-    token = request.query.get("token", "")
-    if _SETUP_TOKEN and token != _SETUP_TOKEN:
-        return web.Response(text="Invalid token", status=403)
     html_path = TEMPLATE_DIR / "setup.html"
     if not html_path.exists():
         return web.Response(text="Template not found", status=500)
@@ -278,10 +275,5 @@ def create_app() -> web.Application:
 
 
 if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--token", default="")
-    args = parser.parse_args()
-    _SETUP_TOKEN = args.token
     log.info("Starting setup web server on http://127.0.0.1:8080")
     web.run_app(create_app(), host="127.0.0.1", port=8080, print=None)
