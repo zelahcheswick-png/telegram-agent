@@ -118,7 +118,7 @@ async def handle_verify_code(request: web.Request) -> web.Response:
 
     try:
         await _telethon_client.sign_in(_phone, code, phone_code_hash=_phone_code_hash)
-        _session_string = await _telethon_client.session.save()
+        _session_string = _telethon_client.session.save()
         return web.json_response({"ok": True, "needs_2fa": False})
     except Exception as e:
         error_str = str(e).lower()
@@ -145,8 +145,8 @@ async def handle_verify_2fa(request: web.Request) -> web.Response:
 
     try:
         await _telethon_client.sign_in(password=password)
-        _session_string = await _telethon_client.session.save()
-        log.info("2FA: authenticated OK")
+        _session_string = _telethon_client.session.save()
+        log.info("2FA: authenticated OK, session saved")
         return web.json_response({"ok": True})
     except Exception as e:
         log.error("2FA error: %s", e)
