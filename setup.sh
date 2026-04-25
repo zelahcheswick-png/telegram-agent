@@ -11,11 +11,17 @@ NC='\033[0m'
 
 TOKEN="$1"
 ENDPOINT="https://bot.pulsedrive.pro"
-REPO="git@github.com:zelahcheswick-png/telegram-agent.git"
+REPO="https://github.com/zelahcheswick-png/telegram-agent.git"
 INSTALL_DIR="/opt/telegram-agent"
 
 echo -e "${GREEN}TransferStats Agent — Установщик${NC}"
 echo ""
+
+# Проверка root
+if [ "$EUID" -ne 0 ]; then
+    echo -e "${RED}Ошибка: запустите от root (sudo)${NC}"
+    exit 1
+fi
 
 # 1. Проверка токена
 if [ -z "$TOKEN" ]; then
@@ -98,9 +104,20 @@ echo -e "${GREEN}  OK${NC}"
 
 # Создать временный agent.ini с токеном
 cat > "$INSTALL_DIR/agent.ini" << EOF
+[telegram]
+api_id =
+api_hash =
+phone =
+session =
+
 [agent]
 token = ${TOKEN}
+api_key =
+api_secret =
 endpoint = ${ENDPOINT}
+
+[groups]
+ids =
 EOF
 chmod 600 "$INSTALL_DIR/agent.ini"
 

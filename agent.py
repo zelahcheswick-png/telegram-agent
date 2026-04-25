@@ -46,8 +46,12 @@ if not CONFIG_PATH.exists():
 CFG = configparser.ConfigParser()
 CFG.read(CONFIG_PATH)
 
-TG = CFG["telegram"]
-AG = CFG["agent"]
+try:
+    TG = CFG["telegram"]
+    AG = CFG["agent"]
+except KeyError as e:
+    log.error("Config missing section %s. Run setup first: telegram-agent reconfigure", e)
+    sys.exit(1)
 
 API_ID = int(TG["api_id"])
 API_HASH = TG["api_hash"]
@@ -198,12 +202,16 @@ async def verify_install():
 
 async def main():
     await verify_install()
-    client.start(phone=PHONE)
+    await client.start(phone=PHONE)
     log.info("Telethon connected, listening on %d groups", len(GROUPS))
-    await asyncio.gather(
-        client.run_until_disconnected(),
-        heartbeat(),
-    )
+    try:
+        await asyncio.gather(
+            client.run_until_disconnected(),
+            heartbeat(),
+        )
+    except Exception as e:
+        log.error("Agent crashed: %s", e)
+        raise
 
 
 if __name__ == "__main__":

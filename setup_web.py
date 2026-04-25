@@ -22,6 +22,7 @@ AGENT_DIR = Path(__file__).parent
 TEMPLATE_DIR = AGENT_DIR / "templates"
 CONFIG_PATH = AGENT_DIR / "agent.ini"
 GROUPS_PATH = AGENT_DIR / "agent_groups.json"
+_SETUP_TOKEN = ""  # Устанавливается при запуске
 
 # Telethon клиент (создаётся при вводе API credentials)
 _telethon_client = None
@@ -33,6 +34,9 @@ _phone_code_hash = None
 # ── Handlers ──────────────────────────────────────────────────────────────────
 
 async def handle_index(request: web.Request) -> web.Response:
+    token = request.query.get("token", "")
+    if _SETUP_TOKEN and token != _SETUP_TOKEN:
+        return web.Response(text="Invalid token", status=403)
     html_path = TEMPLATE_DIR / "setup.html"
     if not html_path.exists():
         return web.Response(text="Template not found", status=500)
@@ -55,7 +59,7 @@ async def handle_send_code(request: web.Request) -> web.Response:
     api_hash = body.get("api_hash", "").strip()
     phone = body.get("phone", "").strip()
 
-    log.info("send-code: api_id=%s phone=%s api_hash=%s...", api_id, phone, api_hash[:8] if api_hash else "")
+    log.info("send-code: api_id=%s phone=%s***", api_id, phone[:4] if phone else "")
 
     if not all([api_id, api_hash, phone]):
         return web.json_response({"error": "api_id, api_hash, phone required"}, status=400)
@@ -187,7 +191,7 @@ async def handle_save(request: web.Request) -> web.Response:
     endpoint = body.get("endpoint", "").strip()
     selected_groups = body.get("groups", [])
 
-    log.info("save: api_id=%s phone=%s token=%s groups=%d", api_id, phone, token[:8] if token else "", len(selected_groups))
+    log.info("save: api_id=%s groups=%d", api_id, len(selected_groups))
 
     if not all([api_id, api_hash, phone, token, endpoint]):
         log.error("save: missing fields: api_id=%s api_hash=%s phone=%s token=%s endpoint=%s",
@@ -239,9 +243,11 @@ ids = {','.join(str(g) for g in selected_groups)}
     # Сохранить группы в JSON (для динамического обновления)
     GROUPS_PATH.write_text(json.dumps({"groups": selected_groups}))
 
-    # Запустить systemd сервис
-    os.system("systemctl enable telegram-agent")
-    os.system("systemctl start telegram-agent")
+    # Запустить systemd сервис (async, не блокирует event loop)
+    proc = await asyncio.create_subprocess_exec("systemctl", "enable", "telegram-agent")
+    await proc.wait()
+    proc = await asyncio.create_subprocess_exec("systemctl", "start", "telegram-agent")
+    await proc.wait()
 
     # Отключить Telethon
     if _telethon_client:
@@ -251,9 +257,9 @@ ids = {','.join(str(g) for g in selected_groups)}
 
 
 async def handle_finish(request: web.Request) -> web.Response:
-    """Корректно завершить работу веб-сервера."""
-    # Даём время на отправку ответа
-    asyncio.get_event_loop().call_later(2, lambda: os._exit(0))
+    """Корректно завершить работу веб-сервера (только POST)."""
+    app = request.app
+    asyncio.get_event_loop().call_later(2, lambda: app.loop.stop())
     return web.json_response({"ok": True, "message": "Shutting down..."})
 
 
@@ -267,12 +273,15 @@ def create_app() -> web.Application:
     app.router.add_post("/api/verify-2fa", handle_verify_2fa)
     app.router.add_get("/api/groups", handle_groups)
     app.router.add_post("/api/save", handle_save)
-    app.router.add_get("/api/finish", handle_finish)
+    app.router.add_post("/api/finish", handle_finish)
     return app
 
 
 if __name__ == "__main__":
-    token = sys.argv[1] if len(sys.argv) > 1 else ""
-    print(f"Starting setup web server on http://127.0.0.1:8080")
-    print(f"Token: {token}")
-    web.run_app(create_app(), host="127.0.0.1", port=8080)
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--token", default="")
+    args = parser.parse_args()
+    _SETUP_TOKEN = args.token
+    log.info("Starting setup web server on http://127.0.0.1:8080")
+    web.run_app(create_app(), host="127.0.0.1", port=8080, print=None)

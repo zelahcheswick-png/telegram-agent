@@ -21,7 +21,7 @@ input:focus { outline: none; border-color: #0088cc; }
 button { width: 100%; padding: 14px; font-size: 16px; border: none; border-radius: 8px;
     background: #0088cc; color: #fff; cursor: pointer; margin-top: 8px; }
 button:hover { background: #006699; }
-button:disabled { background: #333; cursor: not-occupied; }
+button:disabled { background: #333; cursor: not-allowed; }
 .help { font-size: 0.8rem; color: #666; margin-top: 4px; }
 .help a { color: #0088cc; }
 .error { color: #ff4444; font-size: 0.85rem; margin-top: 8px; }
@@ -118,7 +118,8 @@ let phone = '';
 
 function showStep(n) {
     document.querySelectorAll('.step').forEach(s => s.classList.remove('active'));
-    document.getElementById('step' + n).classList.add('active');
+    var el = document.getElementById('step' + n) || document.getElementById(n);
+    if (el) el.classList.add('active');
 }
 
 function goToStep2() {
@@ -211,12 +212,24 @@ async function verify2fa() {
 }
 
 async function loadGroups() {
-    const r = await fetch('/api/groups');
-    const d = await r.json();
-    if (d.ok) {
-        allGroups = d.groups;
-        renderGroups(allGroups);
+    try {
+        const r = await fetch('/api/groups');
+        const d = await r.json();
+        if (d.ok) {
+            allGroups = d.groups;
+            renderGroups(allGroups);
+        } else {
+            document.getElementById('step4-error').textContent = d.error || 'Ошибка загрузки групп';
+        }
+    } catch(e) {
+        document.getElementById('step4-error').textContent = 'Ошибка загрузки групп';
     }
+}
+
+function escapeHtml(s) {
+    var d = document.createElement('div');
+    d.appendChild(document.createTextNode(s));
+    return d.innerHTML;
 }
 
 function renderGroups(groups) {
@@ -226,8 +239,12 @@ function renderGroups(groups) {
         const div = document.createElement('div');
         div.className = 'group-item';
         const checked = selectedGroups.has(g.id) ? 'checked' : '';
-        div.innerHTML = `<input type="checkbox" id="g_${g.id}" ${checked}
-            onchange="toggleGroup(${g.id})"><label for="g_${g.id}">${g.title}</label>`;
+        const cb = document.createElement('input');
+        cb.type = 'checkbox'; cb.id = 'g_'+g.id; cb.checked = checked;
+        cb.onchange = function() { toggleGroup(g.id); };
+        const lbl = document.createElement('label');
+        lbl.htmlFor = 'g_'+g.id; lbl.textContent = g.title;
+        div.appendChild(cb); div.appendChild(lbl);
         list.appendChild(div);
     });
 }
@@ -268,7 +285,7 @@ async function finish() {
         if (d.ok) {
             showStep('done');
             // Попытаться закрыть сервер
-            fetch('/api/finish');
+            fetch('/api/finish', {method: 'POST'});
         } else {
             document.getElementById('step4-error').textContent = d.error || 'Ошибка';
         }
