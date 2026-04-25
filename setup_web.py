@@ -144,12 +144,13 @@ async def handle_verify_2fa(request: web.Request) -> web.Response:
         return web.json_response({"error": "no client"}, status=400)
 
     try:
-        from telethon import functions
-        await _telethon_client(functions.auth.CheckPasswordRequest(password))
+        await _telethon_client.sign_in(password=password)
         _session_string = await _telethon_client.session.save()
+        log.info("2FA: authenticated OK")
         return web.json_response({"ok": True})
     except Exception as e:
-        return web.json_response({"error": str(e)}, status=500)
+        log.error("2FA error: %s", e)
+        return web.json_response({"error": str(e)[:200]}, status=500)
 
 
 async def handle_groups(request: web.Request) -> web.Response:
