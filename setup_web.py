@@ -22,7 +22,7 @@ AGENT_DIR = Path(__file__).parent
 TEMPLATE_DIR = AGENT_DIR / "templates"
 CONFIG_PATH = AGENT_DIR / "agent.ini"
 GROUPS_PATH = AGENT_DIR / "agent_groups.json"
-_SETUP_TOKEN = ""  # Устанавливается при запуске
+_AGENT_TOKEN = ""  # Устанавливается через --token при запуске
 
 # Telethon клиент (создаётся при вводе API credentials)
 _telethon_client = None
@@ -184,13 +184,13 @@ async def handle_save(request: web.Request) -> web.Response:
     api_id = body.get("api_id")
     api_hash = body.get("api_hash", "").strip()
     phone = body.get("phone", "").strip()
-    token = body.get("token", "").strip()
     endpoint = body.get("endpoint", "").strip()
     selected_groups = body.get("groups", [])
+    token = _AGENT_TOKEN  # Используем токен из аргументов запуска
 
     log.info("save: api_id=%s groups=%d", api_id, len(selected_groups))
 
-    if not all([api_id, api_hash, phone, token, endpoint]):
+    if not all([api_id, api_hash, phone, endpoint]):
         log.error("save: missing fields: api_id=%s api_hash=%s phone=%s token=%s endpoint=%s",
                   bool(api_id), bool(api_hash), bool(phone), bool(token), bool(endpoint))
         return web.json_response({"error": "missing fields"}, status=400)
@@ -275,5 +275,10 @@ def create_app() -> web.Application:
 
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--token", default="", help="Agent token for server auth")
+    args = parser.parse_args()
+    _AGENT_TOKEN = args.token
     log.info("Starting setup web server on http://127.0.0.1:8080")
     web.run_app(create_app(), host="127.0.0.1", port=8080, print=None)

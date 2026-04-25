@@ -132,7 +132,7 @@ cd "$INSTALL_DIR"
 source venv/bin/activate
 
 # Запуск setup_web.py в фоне
-python setup_web.py &
+python setup_web.py --token="$TOKEN" &
 WEB_PID=$!
 sleep 3
 
